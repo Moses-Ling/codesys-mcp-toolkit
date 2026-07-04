@@ -850,14 +850,55 @@ try:
     if not hasattr(target_app, 'build'):
          raise TypeError("Selected object '%s' is not an application or doesn't support build()." % app_name)
 
+    # Clear previous compile messages so we only report messages from this build.
+    # {97F48D64-A2A3-4856-B640-75C046E37EA9} is the well-known message category
+    # GUID for compile/build messages in the CODESYS message store.
+    COMPILE_CATEGORY = None
+    try:
+        from System import Guid
+        COMPILE_CATEGORY = Guid("{97F48D64-A2A3-4856-B640-75C046E37EA9}")
+        script_engine.system.clear_messages(COMPILE_CATEGORY)
+        print("DEBUG: Cleared compile message store.")
+    except Exception as clear_err:
+        print("WARN: Could not access/clear message store: %s" % clear_err)
+
     # Execute the build
     target_app.build();
     print("DEBUG: Build command executed for application '%s'." % app_name)
 
-    # Check messages is harder without direct access to message store from script.
-    # Rely on CODESYS UI or log output for now.
-    print("Compile Initiated For Application: %s" % app_name); print("In Project: %s" % project_name)
-    print("SCRIPT_SUCCESS: Application compilation initiated."); sys.exit(0)
+    # Read build results back from the CODESYS message store.
+    # Falls back to the legacy fire-and-forget behavior if the API is unavailable.
+    messages_read = False
+    error_count = 0
+    warning_count = 0
+    if COMPILE_CATEGORY is not None:
+        try:
+            sev = script_engine.Severity
+            msg_objs = script_engine.system.get_message_objects(COMPILE_CATEGORY, sev.FatalError | sev.Error | sev.Warning)
+            for msg in msg_objs:
+                msg_text = getattr(msg, 'text', str(msg))
+                msg_sev = getattr(msg, 'severity', None)
+                if msg_sev == sev.FatalError or msg_sev == sev.Error:
+                    error_count += 1
+                    print("BUILD_ERROR: %s" % msg_text)
+                else:
+                    warning_count += 1
+                    print("BUILD_WARNING: %s" % msg_text)
+            messages_read = True
+        except Exception as msg_err:
+            print("WARN: Could not read build messages from message store: %s" % msg_err)
+
+    if not messages_read:
+        # Legacy behavior: report that the build was triggered, nothing more.
+        print("Compile Initiated For Application: %s" % app_name); print("In Project: %s" % project_name)
+        print("SCRIPT_SUCCESS: Application compilation initiated (build messages unavailable)."); sys.exit(0)
+
+    print("Compile Complete For Application: %s" % app_name); print("In Project: %s" % project_name)
+    print("BUILD_RESULT: %d error(s), %d warning(s)" % (error_count, warning_count))
+    if error_count > 0:
+        print("SCRIPT_ERROR: Build FAILED with %d error(s). See BUILD_ERROR lines above." % error_count)
+        sys.exit(1)
+    print("SCRIPT_SUCCESS: Build PASSED with 0 errors, %d warning(s)." % warning_count); sys.exit(0)
 except Exception as e:
     detailed_error = traceback.format_exc()
     error_message = "Error initiating compilation for project %s: %s\\n%s" % (PROJECT_FILE_PATH, e, detailed_error)
@@ -1389,7 +1430,7 @@ except Exception as e:
 
     server.tool(
         "compile_project", // Tool Name
-        "Compiles (Builds) the primary application within a CODESYS project.", // Tool Description
+        "Compiles (Builds) the primary application within a CODESYS project and returns the build result (errors and warnings) read from the CODESYS message store.", // Tool Description
         { // Input Schema
             projectFilePath: z.string().describe("Path to the project file containing the application to compile (e.g., 'C:/Projects/MyPLC.project').")
         },
@@ -1402,14 +1443,23 @@ except Exception as e:
                 const script = COMPILE_PROJECT_SCRIPT_TEMPLATE.replace("{PROJECT_FILE_PATH}", escapedPath);
                 const result = await executeCodesysScript(script, codesysExePath, codesysProfileName);
                 const success = result.success && result.output.includes("SCRIPT_SUCCESS");
-                // Check for actual compile errors in the output log
-                const hasCompileErrors = result.output.includes("Compile complete --") && !/ 0 error\(s\),/.test(result.output);
-                let message = success ? `Compilation initiated for application in ${absPath}. Check CODESYS messages for results.` : `Failed initiating compilation for ${absPath}. Output:\n${result.output}`;
-                let isError = !success; // Base error status on script success
-                if (success && hasCompileErrors) {
-                    message += " WARNING: Build command reported errors in the output log.";
-                    console.warn("Compile project reported build errors in the output.");
-                    // Report as error if compile fails, even if script technically succeeded
+                // Extract build feedback lines emitted by the script from the message store
+                const buildLines = result.output.split(/\r?\n/)
+                    .map(l => l.trim())
+                    .filter(l => /^BUILD_(ERROR|WARNING|RESULT):/.test(l));
+                const buildFailed = result.output.includes("SCRIPT_ERROR: Build FAILED");
+                let message: string;
+                let isError: boolean;
+                if (success) {
+                    message = `Build PASSED for application in ${absPath}.`
+                        + (buildLines.length ? `\n${buildLines.join("\n")}` : "\n(No build messages reported — result read from message store unavailable; verify in the CODESYS IDE.)");
+                    isError = false;
+                } else if (buildFailed) {
+                    message = `Build FAILED for application in ${absPath}.\n${buildLines.join("\n")}`;
+                    isError = true;
+                    console.warn("Compile project reported build errors.");
+                } else {
+                    message = `Failed initiating compilation for ${absPath}. Output:\n${result.output}`;
                     isError = true;
                 }
                 return { content: [{ type: "text", text: message }], isError: isError };

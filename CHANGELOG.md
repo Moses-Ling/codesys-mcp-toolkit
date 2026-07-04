@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-04 (Moses-Ling fork)
+
+### Added
+- `compile_project` now reads build results back from the CODESYS message store
+  (compile message category `{97F48D64-A2A3-4856-B640-75C046E37EA9}`) via
+  `system.get_message_objects()` and returns them in the tool result:
+  - `BUILD_ERROR:` / `BUILD_WARNING:` lines with the full compiler message text
+  - `BUILD_RESULT: N error(s), M warning(s)` summary
+  - Tool result is flagged `isError` and reports "Build FAILED" when errors exist
+- Message store is cleared before each build so only messages from the current
+  build are reported
+- Falls back to the previous fire-and-forget behavior if the message store API
+  is unavailable
+
 ## [1.1.16] - 2025-05-06
 
 ### Fixed
