@@ -878,14 +878,37 @@ try:
             for msg in msg_objs:
                 msg_text = getattr(msg, 'text', str(msg))
                 msg_sev = getattr(msg, 'severity', None)
-                # Prefix each message with its source location ([<POU>, <position>])
+                # Prefix each message with its source location ([<POU path>, <position>])
                 # when the message store provides one. position_text is the same
-                # human-readable position shown in the CODESYS message view.
+                # human-readable position shown in the CODESYS message view; its line
+                # numbers are relative to the (Decl)/(Impl) section they name.
                 location_parts = []
                 try:
                     msg_obj = getattr(msg, 'object', None)
                     if msg_obj is not None:
-                        location_parts.append(getattr(msg_obj, 'get_name', lambda: "?")())
+                        # Walk parents to build an 'Application/.../POU' path that can be
+                        # passed directly to get_pou_code/set_pou_code. Fall back to the
+                        # bare object name if no Application ancestor is found.
+                        names = []
+                        node = msg_obj
+                        depth = 0
+                        while node is not None and depth < 20:
+                            try:
+                                names.append(node.get_name())
+                            except Exception:
+                                break
+                            node = getattr(node, 'parent', None)
+                            depth += 1
+                        names.reverse()  # root first, message object last
+                        app_idx = -1
+                        for i, n in enumerate(names):
+                            if n and str(n).lower() == 'application':
+                                app_idx = i
+                                break
+                        if app_idx >= 0:
+                            location_parts.append("/".join(str(n) for n in names[app_idx:]))
+                        elif names:
+                            location_parts.append(str(names[-1]))
                 except Exception:
                     pass
                 try:
@@ -1358,6 +1381,56 @@ except Exception as e:
                 return { content: [{ type: "text", text: success ? `Code set for '${sanPouPath}' in ${absPath}. Project saved.` : `Failed set code for '${sanPouPath}'. Output:\n${result.output}` }], isError: !success };
             } catch (e:any) {
                 console.error(`Error set_pou_code ${sanPouPath} in ${absPath}: ${e}`);
+                return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+            }
+        }
+    );
+
+    server.tool(
+        "get_pou_code", // Tool Name
+        "Reads the declaration and implementation code of a specific POU, Method, or Property. Returns the two sections separately; build error positions like 'Line 5, Column 1 (Impl)' from compile_project are line numbers within the corresponding section.", // Tool Description
+        { // Input Schema
+            projectFilePath: z.string().describe("Path to the project file (e.g., 'C:/Projects/MyPLC.project')."),
+            pouPath: z.string().describe("Full relative path to the target object (e.g., 'Application/MyPOU', 'MyFolder/MyFB/MyMethod', 'MyFolder/MyFB/MyProperty').")
+        },
+        async (args) => { // Handler
+            const { projectFilePath, pouPath } = args;
+            let absPath = path.normalize(path.isAbsolute(projectFilePath) ? projectFilePath : path.join(WORKSPACE_DIR, projectFilePath));
+            const sanPouPath = pouPath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+            console.error(`Tool call: get_pou_code: Target='${sanPouPath}', Project='${absPath}'`);
+            try {
+                const escProjPath = absPath.replace(/\\/g, '\\\\');
+                let script = GET_POU_CODE_SCRIPT_TEMPLATE.replace("{PROJECT_FILE_PATH}", escProjPath);
+                script = script.replace("{POU_FULL_PATH}", sanPouPath);
+                const result = await executeCodesysScript(script, codesysExePath, codesysProfileName);
+                const success = result.success && result.output.includes("SCRIPT_SUCCESS");
+                if (!success) {
+                    return { content: [{ type: "text", text: `Failed to read code for '${sanPouPath}' in ${absPath}. Output:\n${result.output}` }], isError: true };
+                }
+                const declStartMarker = "### POU DECLARATION START ###";
+                const declEndMarker = "### POU DECLARATION END ###";
+                const implStartMarker = "### POU IMPLEMENTATION START ###";
+                const implEndMarker = "### POU IMPLEMENTATION END ###";
+                const declStartIdx = result.output.indexOf(declStartMarker);
+                const declEndIdx = result.output.indexOf(declEndMarker);
+                const implStartIdx = result.output.indexOf(implStartMarker);
+                const implEndIdx = result.output.indexOf(implEndMarker);
+                let declaration = "/* Declaration not found in output */";
+                let implementation = "/* Implementation not found in output */";
+                if (declStartIdx !== -1 && declEndIdx !== -1 && declStartIdx < declEndIdx) {
+                    declaration = result.output.substring(declStartIdx + declStartMarker.length, declEndIdx).replace(/\\n/g, '\n').trim();
+                } else { console.error(`WARN: Declaration markers not found correctly for ${sanPouPath}`); }
+                if (implStartIdx !== -1 && implEndIdx !== -1 && implStartIdx < implEndIdx) {
+                    implementation = result.output.substring(implStartIdx + implStartMarker.length, implEndIdx).replace(/\\n/g, '\n').trim();
+                } else { console.error(`WARN: Implementation markers not found correctly for ${sanPouPath}`); }
+                // Build error positions are section-relative: '(Decl)' counts from the first
+                // declaration line, '(Impl)' from the first implementation line.
+                const codeText = `Code for '${sanPouPath}' in ${absPath}.\n`
+                    + `Note: compile_project error positions marked '(Decl)' or '(Impl)' are line numbers within the corresponding section below.\n\n`
+                    + `// ----- Declaration -----\n${declaration}\n\n// ----- Implementation -----\n${implementation}`;
+                return { content: [{ type: "text", text: codeText }], isError: false };
+            } catch (e: any) {
+                console.error(`Error get_pou_code ${sanPouPath} in ${absPath}: ${e}`);
                 return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
             }
         }
