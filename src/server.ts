@@ -1066,13 +1066,17 @@ try:
 
 
     print("Code retrieved for: %s" % target_name)
-    # Print declaration between markers, ensuring markers are on separate lines
+    # CODESYS's script output pipeline drops empty print lines, which would shift
+    # line numbers relative to compile_project positions. Each section is therefore
+    # emitted as ONE newline-escaped line (backslash escaped first); the server
+    # decodes it back to the exact original text, blank lines included.
+    def escape_code(code):
+        return code.replace("\\\\", "\\\\\\\\").replace("\\r\\n", "\\n").replace("\\r", "\\n").replace("\\n", "\\\\n")
     print("\\n" + DECL_START_MARKER)
-    print(declaration_code)
+    print(escape_code(declaration_code))
     print(DECL_END_MARKER + "\\n")
-    # Print implementation between markers
     print(IMPL_START_MARKER)
-    print(implementation_code)
+    print(escape_code(implementation_code))
     print(IMPL_END_MARKER + "\\n")
 
     # --- LEGACY MARKERS for backward compatibility if needed ---
@@ -1415,13 +1419,16 @@ except Exception as e:
                 const declEndIdx = result.output.indexOf(declEndMarker);
                 const implStartIdx = result.output.indexOf(implStartMarker);
                 const implEndIdx = result.output.indexOf(implEndMarker);
+                // Sections arrive as one newline-escaped line (see script template);
+                // decode in a single pass so literal backslashes in code survive.
+                const decodeEscapedCode = (s: string) => s.trim().replace(/\\(n|\\)/g, (_m, c) => c === 'n' ? '\n' : '\\');
                 let declaration = "/* Declaration not found in output */";
                 let implementation = "/* Implementation not found in output */";
                 if (declStartIdx !== -1 && declEndIdx !== -1 && declStartIdx < declEndIdx) {
-                    declaration = result.output.substring(declStartIdx + declStartMarker.length, declEndIdx).replace(/\\n/g, '\n').trim();
+                    declaration = decodeEscapedCode(result.output.substring(declStartIdx + declStartMarker.length, declEndIdx));
                 } else { console.error(`WARN: Declaration markers not found correctly for ${sanPouPath}`); }
                 if (implStartIdx !== -1 && implEndIdx !== -1 && implStartIdx < implEndIdx) {
-                    implementation = result.output.substring(implStartIdx + implStartMarker.length, implEndIdx).replace(/\\n/g, '\n').trim();
+                    implementation = decodeEscapedCode(result.output.substring(implStartIdx + implStartMarker.length, implEndIdx));
                 } else { console.error(`WARN: Implementation markers not found correctly for ${sanPouPath}`); }
                 // Build error positions are section-relative: '(Decl)' counts from the first
                 // declaration line, '(Impl)' from the first implementation line.
