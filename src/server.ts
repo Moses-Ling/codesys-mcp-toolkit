@@ -578,6 +578,9 @@ import sys, scriptengine as script_engine, os, traceback
 ${ENSURE_PROJECT_OPEN_PYTHON_SNIPPET}
 ${FIND_OBJECT_BY_PATH_PYTHON_SNIPPET}
 POU_FULL_PATH = "{POU_FULL_PATH}" # Expecting format like "Application/MyPOU" or "Folder/SubFolder/MyPOU"
+# Flags distinguish "section not provided" (leave untouched) from "provided as empty string" (clear it).
+HAS_DECLARATION = {HAS_DECLARATION}
+HAS_IMPLEMENTATION = {HAS_IMPLEMENTATION}
 DECLARATION_CONTENT = """{DECLARATION_CONTENT}"""
 IMPLEMENTATION_CONTENT = """{IMPLEMENTATION_CONTENT}"""
 
@@ -595,9 +598,7 @@ try:
 
     # --- Set Declaration Part ---
     declaration_updated = False
-    # Check if the content is actually provided (might be None/empty if only impl is set)
-    has_declaration_content = 'DECLARATION_CONTENT' in locals() or 'DECLARATION_CONTENT' in globals()
-    if has_declaration_content and DECLARATION_CONTENT is not None: # Check not None
+    if HAS_DECLARATION: # Only touch the declaration if the tool call provided it
         if hasattr(target_object, 'textual_declaration'):
             decl_obj = target_object.textual_declaration
             if decl_obj and hasattr(decl_obj, 'replace'):
@@ -614,13 +615,12 @@ try:
         else:
             print("WARN: Target '%s' does not have textual_declaration attribute. Skipping declaration update." % target_name)
     else:
-         print("DEBUG: Declaration content not provided or is None. Skipping declaration update.")
+         print("DEBUG: Declaration content not provided. Leaving declaration unchanged.")
 
 
     # --- Set Implementation Part ---
     implementation_updated = False
-    has_implementation_content = 'IMPLEMENTATION_CONTENT' in locals() or 'IMPLEMENTATION_CONTENT' in globals()
-    if has_implementation_content and IMPLEMENTATION_CONTENT is not None: # Check not None
+    if HAS_IMPLEMENTATION: # Only touch the implementation if the tool call provided it
         if hasattr(target_object, 'textual_implementation'):
             impl_obj = target_object.textual_implementation
             if impl_obj and hasattr(impl_obj, 'replace'):
@@ -637,7 +637,7 @@ try:
         else:
             print("WARN: Target '%s' does not have textual_implementation attribute. Skipping implementation update." % target_name)
     else:
-        print("DEBUG: Implementation content not provided or is None. Skipping implementation update.")
+        print("DEBUG: Implementation content not provided. Leaving implementation unchanged.")
 
 
     # --- SAVE THE PROJECT TO PERSIST THE CODE CHANGE ---
@@ -878,12 +878,29 @@ try:
             for msg in msg_objs:
                 msg_text = getattr(msg, 'text', str(msg))
                 msg_sev = getattr(msg, 'severity', None)
+                # Prefix each message with its source location ([<POU>, <position>])
+                # when the message store provides one. position_text is the same
+                # human-readable position shown in the CODESYS message view.
+                location_parts = []
+                try:
+                    msg_obj = getattr(msg, 'object', None)
+                    if msg_obj is not None:
+                        location_parts.append(getattr(msg_obj, 'get_name', lambda: "?")())
+                except Exception:
+                    pass
+                try:
+                    pos_text = getattr(msg, 'position_text', None)
+                    if pos_text:
+                        location_parts.append(str(pos_text))
+                except Exception:
+                    pass
+                location_prefix = ("[%s] " % ", ".join(location_parts)) if location_parts else ""
                 if msg_sev == sev.FatalError or msg_sev == sev.Error:
                     error_count += 1
-                    print("BUILD_ERROR: %s" % msg_text)
+                    print("BUILD_ERROR: %s%s" % (location_prefix, msg_text))
                 else:
                     warning_count += 1
-                    print("BUILD_WARNING: %s" % msg_text)
+                    print("BUILD_WARNING: %s%s" % (location_prefix, msg_text))
             messages_read = True
         except Exception as msg_err:
             print("WARN: Could not read build messages from message store: %s" % msg_err)
@@ -1329,6 +1346,8 @@ except Exception as e:
                 const sanImplCode = (implementationCode ?? "").replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"');
                 let script = SET_POU_CODE_SCRIPT_TEMPLATE.replace("{PROJECT_FILE_PATH}", escProjPath);
                 script = script.replace("{POU_FULL_PATH}", sanPouPath);
+                script = script.replace("{HAS_DECLARATION}", declarationCode !== undefined ? "True" : "False");
+                script = script.replace("{HAS_IMPLEMENTATION}", implementationCode !== undefined ? "True" : "False");
                 script = script.replace("{DECLARATION_CONTENT}", sanDeclCode);
                 script = script.replace("{IMPLEMENTATION_CONTENT}", sanImplCode);
 
